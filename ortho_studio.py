@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-OrthoMerge Studio v3 — GUI mit Validierung, Multi-Metrik Analyse, Merge & Preview
-
-Voraussetzung: analyze_deltas.py muss im selben Ordner liegen.
+OrthoMerge Studio v4 — GUI
 Starten: python ortho_studio.py [--verbose]
+Braucht: analyze_deltas.py im selben Ordner
 """
 
 import os, sys, glob, time, math, io, subprocess, itertools
@@ -12,11 +11,10 @@ VERBOSE = "--verbose" in sys.argv or "-v" in sys.argv or "--v" in sys.argv
 COMFYUI_DIR = os.path.expanduser("~/ComfyUI")
 COMFYUI_API = "http://127.0.0.1:8188"
 
-# Import Analyse-Engine
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from analyze_deltas import (
-    validate_model, fix_model, streaming_analysis,
-    build_recommendation, classify_keys, compute_merge_score,
+    validate_model, fix_model, streaming_core, compute_effective_rank,
+    compute_derived, build_recommendation, build_key_mapping,
 )
 from safetensors import safe_open
 
@@ -39,12 +37,10 @@ def vlog(msg):
         print(f"[V] {msg}", flush=True)
 
 
-# ─── Formatierung ─────────────────────────────────────────────────
-
 def fmt_matrix(m, names, title, fmt=".4f"):
     short = [n[:18] for n in names]
     w = max(len(s) for s in short) + 2
-    lines = [title, "─" * 60]
+    lines = [title, "─" * 55]
     lines.append(" " * w + "".join(f"{s:>{w}}" for s in short))
     for i in range(len(names)):
         row = f"{short[i]:<{w}}"
@@ -55,33 +51,13 @@ def fmt_matrix(m, names, title, fmt=".4f"):
                 row += f"{m[i][j]:>{w}.1%}"
             elif fmt == ".2f":
                 row += f"{m[i][j]:>{w}.2f}"
+            elif fmt == ".0%":
+                row += f"{m[i][j]:>{w}.0%}"
             else:
                 row += f"{m[i][j]:>{w}{fmt}}"
         lines.append(row)
     return "\n".join(lines)
 
-
-def fmt_magnitudes(mags, names):
-    lines = ["MAGNITUDE", "─" * 50]
-    mx = max(mags) if mags else 1
-    for name, mag in zip(names, mags):
-        bar = "█" * int(30 * mag / mx) if mx > 0 else ""
-        lines.append(f"  {name[:28]:28s}  {mag:10.2f}  {bar}")
-    return "\n".join(lines)
-
-
-def fmt_blocks(block_cos, names):
-    n = len(names)
-    lines = ["PER-BLOCK COSINE", "─" * 50]
-    for block in sorted(block_cos.keys()):
-        bc = block_cos[block]
-        sims = [bc[i][j] for i, j in itertools.combinations(range(n), 2)]
-        avg = sum(sims) / len(sims) if sims else 0
-        lines.append(f"  {block:38s}  avg={avg:+.4f}")
-    return "\n".join(lines)
-
-
-# ─── Merge ────────────────────────────────────────────────────────
 
 def run_merge(script_text, output_name):
     if output_name:
@@ -94,16 +70,16 @@ def run_merge(script_text, output_name):
         if not os.path.exists(py):
             py = sys.executable
         r = subprocess.run([py, tmp], capture_output=True, text=True,
-                          cwd=COMFYUI_DIR, timeout=7200)
+                          cwd=COMFYUI_DIR, timeout=14400)
         return r.returncode == 0, r.stdout + "\n" + r.stderr
+    except subprocess.TimeoutExpired:
+        return False, "Timeout (>4h)"
     except Exception as e:
         return False, str(e)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
 
-
-# ─── Preview ──────────────────────────────────────────────────────
 
 def comfyui_ok():
     try:
@@ -119,14 +95,11 @@ def gen_preview(model_path, prompt, w, h, steps, cfg):
         from PIL import Image
     except ImportError:
         return None, "pip install requests Pillow"
-
     if not comfyui_ok():
         return None, "ComfyUI nicht erreichbar!"
-
     rel = ""
     if "/diffusion_models/" in model_path:
         rel = model_path.split("/diffusion_models/")[1]
-
     wf = {
         "3": {"class_type": "UNETLoader",
               "inputs": {"unet_name": rel, "weight_dtype": "default"}},
@@ -176,218 +149,231 @@ def gen_preview(model_path, prompt, w, h, steps, cfg):
         return None, str(e)
 
 
-# ─── Gradio App ───────────────────────────────────────────────────
+# ─── Gradio ───────────────────────────────────────────────────────
 
 def create_app():
     import gradio as gr
 
-    with gr.Blocks(title="OrthoMerge Studio") as app:
-
-        gr.Markdown("# 🔬 OrthoMerge Studio v3\n*Validierung → Analyse → Merge → Preview*")
+    with gr.Blocks(title="OrthoMerge Studio v4") as app:
+        gr.Markdown("# 🔬 OrthoMerge Studio v4\n*Validierung → Analyse → Signalqualität → Lineage → Empfehlung → Merge → Preview*")
 
         with gr.Row():
             arch_dd = gr.Dropdown(list(DEFAULT_DIRS.keys()), value="Flux.2 Klein",
                                  label="Architektur", scale=1)
-            arch_cfg = gr.Textbox(value="flux2-klein", label="sd_mecha Config", scale=1)
+            arch_cfg = gr.Textbox(value="flux2-klein", label="Config", scale=1)
             model_dir = gr.Textbox(value=DEFAULT_DIRS["Flux.2 Klein"],
-                                  label="Modellverzeichnis", scale=3)
+                                  label="Verzeichnis", scale=3)
 
         with gr.Row():
             base_dd = gr.Dropdown([], label="Base-Modell", scale=2)
             model_cb = gr.CheckboxGroup([], label="Modelle (leer = alle)", scale=3)
             refresh = gr.Button("🔄", scale=1)
 
-        def on_arch(choice):
-            return DEFAULT_DIRS.get(choice, ""), ARCH_CONFIGS.get(choice, "")
-
+        def on_arch(c):
+            return DEFAULT_DIRS.get(c, ""), ARCH_CONFIGS.get(c, "")
         arch_dd.change(on_arch, [arch_dd], [model_dir, arch_cfg])
 
-        def on_refresh(arch, mdir, cur_base):
+        def on_refresh(arch, mdir, cur):
             d = mdir if arch == "Custom" else DEFAULT_DIRS.get(arch, "")
             if not d or not os.path.isdir(d):
                 return gr.update(choices=[]), gr.update(choices=[])
             files = [os.path.basename(f) for f in sorted(glob.glob(os.path.join(d, "*.safetensors")))]
-            return (gr.update(choices=files, value=[]),
-                    gr.update(choices=files, value=cur_base if cur_base in files else None))
-
+            return gr.update(choices=files, value=[]), gr.update(choices=files, value=cur if cur in files else None)
         refresh.click(on_refresh, [arch_dd, model_dir, base_dd], [model_cb, base_dd])
 
         with gr.Tabs():
-
-            # ── Tab 1: Analyse ──
-            with gr.Tab("📊 Analyse & Validierung"):
+            with gr.Tab("📊 Analyse"):
                 with gr.Row():
-                    auto_fix = gr.Checkbox(value=True, label="Auto-Fix (Prefix/FP8/Norm-Keys/CLIP/VAE)")
-                    analyze_btn = gr.Button("🔬 Validierung + Analyse", variant="primary", size="lg")
+                    auto_fix = gr.Checkbox(value=True, label="Auto-Fix")
+                    rank_samples = gr.Number(value=5, label="Rank-Samples", precision=0)
+                    analyze_btn = gr.Button("🔬 Analyse starten", variant="primary", size="lg")
 
-                log_box = gr.Textbox(label="📋 Log", lines=15, interactive=False)
+                log_box = gr.Textbox(label="📋 Log (6 Phasen)", lines=18, interactive=False)
+                with gr.Row():
+                    matrix_box = gr.Textbox(label="Metriken", lines=20, interactive=False)
+                    detail_box = gr.Textbox(label="Signalqualität & Lineage", lines=20, interactive=False)
+                rec_box = gr.Textbox(label="📋 Empfehlung", lines=18, interactive=False)
 
                 with gr.Row():
-                    matrix_box = gr.Textbox(label="Metriken", lines=18, interactive=False)
-                    detail_box = gr.Textbox(label="Magnitude & Blocks", lines=18, interactive=False)
+                    strategy_radio = gr.Radio(
+                        choices=["A — Lineage-basiert", "B — Automatisch"],
+                        value="A — Lineage-basiert",
+                        label="Strategie wählen", scale=2)
 
-                rec_box = gr.Textbox(label="📋 Empfehlung", lines=14, interactive=False)
-                script_box = gr.Code(label="Merge-Script", language="python", lines=22)
+                script_box = gr.Code(label="Merge-Script (mit Post-Merge-Fix)", language="python", lines=25)
+                script_a_hidden = gr.Textbox(visible=False)
+                script_b_hidden = gr.Textbox(visible=False)
 
-                def do_analysis(arch, mdir, base_name, selected, acfg, autofix):
+                def do_analysis(arch, mdir, base_name, selected, acfg, autofix, n_rank):
                     d = mdir if arch == "Custom" else DEFAULT_DIRS.get(arch, "")
                     if not d or not os.path.isdir(d):
-                        return "❌ Verzeichnis nicht gefunden", "", "", "", ""
-
+                        return "❌ Verzeichnis", "", "", "", "", "", ""
                     base_path = os.path.join(d, base_name) if base_name else ""
-                    if not base_path or not os.path.exists(base_path):
-                        return "❌ Base-Modell nicht gefunden", "", "", "", ""
+                    if not os.path.exists(base_path):
+                        return "❌ Base nicht gefunden", "", "", "", "", "", ""
 
                     if selected and len(selected) >= 2:
                         candidates = [os.path.join(d, m) for m in selected if m != base_name]
                     else:
                         all_f = sorted(glob.glob(os.path.join(d, "*.safetensors")))
-                        candidates = [f for f in all_f
-                                     if os.path.abspath(f) != os.path.abspath(base_path)]
-
+                        candidates = [f for f in all_f if os.path.abspath(f) != os.path.abspath(base_path)]
                     if len(candidates) < 2:
-                        return "❌ Mindestens 2 Modelle nötig", "", "", "", ""
+                        return "❌ Mind. 2 Modelle", "", "", "", "", "", ""
 
-                    # ── Validierung ──
-                    log_lines = []
-                    log_lines.append(f"═══ VALIDIERUNG ═══")
-                    log_lines.append(f"Base: {os.path.basename(base_path)}")
+                    log = []
 
+                    # Phase 1
+                    log.append("═══ PHASE 1: VALIDIERUNG ═══")
                     base_f = safe_open(base_path, framework="pt", device="cpu")
                     base_keys = list(base_f.keys())
                     del base_f
-                    log_lines.append(f"Base: {len(base_keys)} Keys\n")
+                    log.append(f"Base: {os.path.basename(base_path)} ({len(base_keys)} Keys)\n")
 
-                    valid_paths = []
+                    valid = []
                     for p in candidates:
                         v = validate_model(p, base_keys)
                         if v["fixes"]:
-                            fixes_str = ", ".join(v["fixes"])
-                            log_lines.append(f"🔧 {v['name']}: {fixes_str}")
+                            log.append(f"🔧 {v['name']}: {' | '.join(v['issues'])}")
                             if autofix:
                                 try:
-                                    fixed = fix_model(p, v["fixes"], base_keys)
-                                    valid_paths.append(fixed)
-                                    log_lines.append(f"   → Repariert")
+                                    fix_model(p, v["fixes"], base_keys)
+                                    valid.append(p)
+                                    log.append(f"   → Repariert")
                                 except Exception as e:
-                                    log_lines.append(f"   → Fix fehlgeschlagen: {e}")
-                            else:
-                                log_lines.append(f"   → Übersprungen (Auto-Fix aus)")
+                                    log.append(f"   → Fehler: {e}")
                         else:
-                            log_lines.append(f"✅ {v['name']}")
-                            valid_paths.append(p)
+                            log.append(f"✅ {v['name']}")
+                            valid.append(p)
 
-                    if len(valid_paths) < 2:
-                        log_lines.append(f"\n❌ Nur {len(valid_paths)} kompatible Modelle.")
-                        return "\n".join(log_lines), "", "", "", ""
+                    if len(valid) < 2:
+                        return "\n".join(log) + "\n\n❌ Zu wenige kompatible Modelle", "", "", "", "", "", ""
 
-                    # ── Analyse ──
-                    log_lines.append(f"\n═══ ANALYSE ({len(valid_paths)} Modelle) ═══")
-
-                    def log_cb(msg):
-                        log_lines.append(msg)
+                    # Phase 2
+                    log.append(f"\n═══ PHASE 2: STREAMING ({len(valid)} Modelle) ═══")
+                    def log_fn(msg):
+                        log.append(msg)
                         vlog(msg)
+                    raw = streaming_core(base_path, valid, log_fn=log_fn)
 
-                    results = streaming_analysis(base_path, valid_paths, log_fn=log_cb)
-                    names = results["names"]
+                    # Phase 3
+                    log.append(f"\n═══ PHASE 3: SIGNALQUALITÄT ═══")
+                    rev_maps = [build_key_mapping(p, base_keys) for p in valid]
+                    eff_ranks = compute_effective_rank(base_path, valid, rev_maps,
+                                                       base_keys, raw["key_sizes"],
+                                                       n_samples=int(n_rank), log_fn=log_fn)
+                    for mi, (name, er) in enumerate(zip(raw["names"], eff_ranks)):
+                        log.append(f"  {name}: eff_rank={er:.3f}")
 
-                    log_text = "\n".join(log_lines)
+                    # Phase 4
+                    log.append(f"\n═══ PHASE 4: METRIKEN ═══")
+                    derived = compute_derived(raw)
+                    derived["outlier_scores"] = [
+                        round(raw["outlier_max"][mi] / max(raw["outlier_mean_sum"][mi] / max(raw["outlier_count"][mi], 1), 1e-10), 1)
+                        for mi in range(raw["n"])
+                    ]
+                    names = derived["names"]
 
-                    # Matrizen
-                    mat = fmt_matrix(results["cos_matrix"], names, "COSINE SIMILARITY")
-                    mat += "\n\n" + fmt_matrix(results["l2_matrix"], names, "L2-DISTANZ", fmt=".2f")
-                    mat += "\n\n" + fmt_matrix(results["spearman_matrix"], names, "SPEARMAN RANK")
-                    mat += "\n\n" + fmt_matrix(results["topk_matrix"], names,
-                                              f"TOP-{int(results['topk_pct']*100)}% OVERLAP")
-                    mat += "\n\n" + fmt_matrix(results["conf_matrix"], names, "CONFLICT RATIO", fmt=".1%")
+                    # Matrizen formatieren
+                    mat = fmt_matrix(derived["cos"], names, "COSINE SIMILARITY")
+                    mat += "\n\n" + fmt_matrix(derived["l2"], names, "L2-DISTANZ", fmt=".2f")
+                    mat += "\n\n" + fmt_matrix(derived["new_info"], names, "NEUE INFO (%)", fmt=".0%")
+                    mat += "\n\n" + fmt_matrix(derived["spearman"], names, "SPEARMAN RANK")
+                    mat += "\n\n" + fmt_matrix(derived["topk"], names, "TOP-5% OVERLAP")
+                    mat += "\n\n" + fmt_matrix(derived["conf"], names, "CONFLICT RATIO", fmt=".1%")
 
                     # Details
-                    det = fmt_magnitudes(results["mags"], names)
-                    det += "\n\n" + fmt_blocks(results["block_cos"], names)
+                    det_lines = ["MAGNITUDE + SURVIVAL", "─" * 50]
+                    mx = max(derived["mags"]) if derived["mags"] else 1
+                    for mi, (nm, mg) in enumerate(zip(names, derived["mags"])):
+                        bar = "█" * int(25 * mg / mx) if mx > 0 else ""
+                        det_lines.append(f"  {nm[:28]:28s} mag:{mg:8.0f} surv:{derived['survival'][mi]:5.1f}% {bar}")
 
-                    # Empfehlung
-                    rec, script, _ = build_recommendation(results, arch=acfg)
+                    det_lines += ["", "SIGNALQUALITÄT", "─" * 50]
+                    for mi, nm in enumerate(names):
+                        er = eff_ranks[mi]
+                        q = "★★★" if er < 0.3 else "★★" if er < 0.6 else "★"
+                        ol = derived["outlier_scores"][mi]
+                        ow = " ⚠outlier" if ol > 500 else ""
+                        det_lines.append(f"  {nm[:28]:28s} Fokus:{q} rank={er:.2f}{ow}")
 
-                    return log_text, mat, det, rec, script
+                    det_lines += ["", "LINEAGE", "─" * 50]
+                    for nm, li in derived["lineage"].items():
+                        extra = ""
+                        if li["best_parent"] != "base" and li["improvement"] > 20:
+                            extra = f" ← via '{li['best_parent']}' ({li['improvement']:.0f}% besser)"
+                        det_lines.append(f"  {nm[:28]:28s} dist={li['dist_to_base']:.0f}{extra}")
 
-                analyze_btn.click(
-                    do_analysis,
-                    [arch_dd, model_dir, base_dd, model_cb, arch_cfg, auto_fix],
-                    [log_box, matrix_box, detail_box, rec_box, script_box]
-                )
+                    det = "\n".join(det_lines)
 
-            # ── Tab 2: Merge ──
+                    # Phase 5
+                    log.append(f"\n═══ PHASE 5: EMPFEHLUNG ═══")
+                    rec, script_a, script_b, _ = build_recommendation(derived, eff_ranks, arch=acfg)
+                    log.append("Fertig.")
+
+                    return "\n".join(log), mat, det, rec, script_a, script_a, script_b
+
+                analyze_btn.click(do_analysis,
+                    [arch_dd, model_dir, base_dd, model_cb, arch_cfg, auto_fix, rank_samples],
+                    [log_box, matrix_box, detail_box, rec_box, script_box, script_a_hidden, script_b_hidden])
+
+                def on_strategy_change(choice, sa, sb):
+                    if "A" in choice:
+                        return sa
+                    return sb
+
+                strategy_radio.change(on_strategy_change,
+                    [strategy_radio, script_a_hidden, script_b_hidden],
+                    [script_box])
+
             with gr.Tab("🔀 Merge"):
-                gr.Markdown("Script aus der Analyse wird automatisch übernommen.")
-                merge_script = gr.Code(label="Merge-Script (editierbar)", language="python", lines=25)
+                merge_script = gr.Code(label="Script (editierbar)", language="python", lines=28)
                 with gr.Row():
-                    out_name = gr.Textbox(value="OrthoMerge_result.safetensors",
-                                         label="Output-Name", scale=3)
+                    out_name = gr.Textbox(value="OrthoMerge_result.safetensors", label="Output", scale=3)
                     merge_btn = gr.Button("🚀 Merge", variant="primary", scale=1)
-                merge_log = gr.Textbox(label="Merge-Log", lines=15, interactive=False)
-
+                merge_log = gr.Textbox(label="Log", lines=15, interactive=False)
                 script_box.change(lambda x: x, [script_box], [merge_script])
 
-                def do_merge(script, oname):
-                    if not script.strip():
-                        return "❌ Kein Script"
-                    if not oname.endswith(".safetensors"):
-                        oname += ".safetensors"
-                    ok, out = run_merge(script, oname)
-                    return f"{'✅ Erfolgreich' if ok else '❌ Fehlgeschlagen'}\n\n{out}"
-
+                def do_merge(s, o):
+                    if not s.strip(): return "❌ Kein Script"
+                    if not o.endswith(".safetensors"): o += ".safetensors"
+                    ok, out = run_merge(s, o)
+                    return f"{'✅ OK' if ok else '❌ Fehler'}\n\n{out}"
                 merge_btn.click(do_merge, [merge_script, out_name], [merge_log])
 
-            # ── Tab 3: Preview ──
             with gr.Tab("🖼️ Preview"):
-                running = comfyui_ok()
-                gr.Markdown(f"ComfyUI: {'🟢' if running else '🔴'} {COMFYUI_API}")
-
+                gr.Markdown(f"ComfyUI: {'🟢' if comfyui_ok() else '🔴'} {COMFYUI_API}")
                 with gr.Row():
-                    prev_model = gr.Dropdown([], label="Modell", scale=3)
-                    prev_refresh = gr.Button("🔄", scale=1)
-
-                prev_prompt = gr.Textbox(
-                    value="A woman in sunlit garden, photorealistic, detailed skin",
-                    label="Prompt", lines=3)
-
+                    prev_m = gr.Dropdown([], label="Modell", scale=3)
+                    prev_r = gr.Button("🔄", scale=1)
+                prev_p = gr.Textbox(value="A woman in sunlit garden, photorealistic, detailed skin",
+                                   label="Prompt", lines=3)
                 with gr.Row():
                     pw = gr.Number(value=1024, label="W", precision=0)
                     ph = gr.Number(value=1024, label="H", precision=0)
                     ps = gr.Slider(1, 50, value=4, step=1, label="Steps")
                     pc = gr.Slider(0, 20, value=1.0, step=0.5, label="CFG")
-
                 prev_btn = gr.Button("🎨 Generieren", variant="primary", size="lg")
                 prev_img = gr.Image(label="Vorschau", height=512)
-                prev_status = gr.Textbox(label="Status", interactive=False)
+                prev_st = gr.Textbox(label="Status", interactive=False)
 
-                def prev_refresh_fn(arch, mdir):
-                    d = mdir if arch == "Custom" else DEFAULT_DIRS.get(arch, "")
-                    if not d:
-                        return gr.update(choices=[])
-                    return gr.update(choices=[os.path.basename(f)
-                                             for f in sorted(glob.glob(os.path.join(d, "*.safetensors")))])
+                def rp(a, d):
+                    d2 = d if a == "Custom" else DEFAULT_DIRS.get(a, "")
+                    if not d2: return gr.update(choices=[])
+                    return gr.update(choices=[os.path.basename(f) for f in sorted(glob.glob(os.path.join(d2, "*.safetensors")))])
+                prev_r.click(rp, [arch_dd, model_dir], [prev_m])
 
-                prev_refresh.click(prev_refresh_fn, [arch_dd, model_dir], [prev_model])
-
-                def do_preview(arch, mdir, mname, prompt, w, h, steps, cfg):
-                    d = mdir if arch == "Custom" else DEFAULT_DIRS.get(arch, "")
-                    p = os.path.join(d, mname) if mname else ""
-                    if not os.path.exists(p):
-                        return None, "❌ Modell nicht gefunden"
-                    return gen_preview(p, prompt, w, h, steps, cfg)
-
-                prev_btn.click(do_preview,
-                              [arch_dd, model_dir, prev_model, prev_prompt, pw, ph, ps, pc],
-                              [prev_img, prev_status])
+                def dp(a, d, m, p, w, h, s, c):
+                    d2 = d if a == "Custom" else DEFAULT_DIRS.get(a, "")
+                    fp = os.path.join(d2, m) if m else ""
+                    if not os.path.exists(fp): return None, "❌ Nicht gefunden"
+                    return gen_preview(fp, p, w, h, s, c)
+                prev_btn.click(dp, [arch_dd, model_dir, prev_m, prev_p, pw, ph, ps, pc], [prev_img, prev_st])
 
         app.load(on_refresh, [arch_dd, model_dir, base_dd], [model_cb, base_dd])
-
     return app
 
 
 if __name__ == "__main__":
-    if VERBOSE:
-        print("OrthoMerge Studio v3 — Verbose")
+    if VERBOSE: print("OrthoMerge Studio v4 — Verbose")
     app = create_app()
     app.launch(server_name="0.0.0.0", server_port=7860, share=False, inbrowser=True)
