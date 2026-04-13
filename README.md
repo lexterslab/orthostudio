@@ -43,7 +43,7 @@ Produces ready-to-run Python scripts with post-merge validation (missing key res
 
 ```bash
 cd ~/ComfyUI
-git clone https://github.com/YOUR_USERNAME/ortho-merge-studio.git
+git clone https://github.com/lexterslab/ortho-merge-studio.git
 cd ortho-merge-studio
 
 # Copy files to ComfyUI root
