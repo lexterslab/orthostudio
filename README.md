@@ -3,53 +3,9 @@
 
 **Intelligent Model Merging for Diffusion Models**
 
-Analyze, optimize, and merge diffusion models (Flux, Chroma, Z-Image, etc.) using orthogonal delta decomposition. OrthoMerge Studio automatically finds the optimal delta-base assignments, detects redundancy, and generates merge scripts — while giving you full manual control through an intuitive mixer interface.
 
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
-![License MIT](https://img.shields.io/badge/license-MIT-green)
-![Gradio UI](https://img.shields.io/badge/UI-Gradio-orange)
 
----
 
-## Table of Contents
-
-- [What Does This Do?](#what-does-this-do)
-- [Key Features](#key-features)
-  - [Exhaustive Delta-Base Optimization](#1-exhaustive-delta-base-optimization)
-  - [Full-Pairwise Streaming Analysis](#2-full-pairwise-streaming-analysis)
-  - [Visual Delta Mixer](#3-visual-delta-mixer)
-  - [Streamlined Analysis](#4-streamlined-analysis)
-  - [ComfyUI Integration](#5-comfyui-integration)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-  - [Launch the GUI](#launch-the-gui)
-  - [Step-by-Step Workflow](#step-by-step-workflow)
-  - [CLI Usage](#cli-usage-without-gui)
-- [Analysis Pipeline](#analysis-pipeline)
-  - [Phase 1: Validation and Auto-Fix](#phase-1-validation--auto-fix)
-  - [Phase 2: Full-Pairwise Streaming](#phase-2-full-pairwise-streaming)
-  - [Phase 3: Signal Quality](#phase-3-signal-quality-svd-based)
-  - [Phase 4: Metrics and Optimization](#phase-4-metrics--exhaustive-optimization)
-- [How the Math Works](#how-the-math-works)
-  - [Delta Computation from Stored Dot Products](#delta-computation-from-stored-dot-products)
-  - [Orthogonality Score](#orthogonality-score)
-  - [Quality Score](#quality-score-per-model)
-  - [Survival Prediction](#survival-prediction)
-- [The Mixer in Detail](#the-mixer-in-detail)
-  - [Row Parameters](#row-parameters)
-  - [Global Merge Parameters](#global-merge-parameters)
-  - [Auto-Fill Logic](#auto-fill-logic)
-  - [Manual Override Examples](#manual-override-examples)
-- [Supported Architectures](#supported-architectures)
-- [Example: Chroma Merge Recipe](#example-chroma-merge-recipe)
-- [Generated Merge Script Structure](#generated-merge-script-structure)
-- [Configuration](#configuration)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [Acknowledgments](#acknowledgments)
-- [License](#license)
-
----
 
 ## What Does This Do?
 
