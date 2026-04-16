@@ -624,7 +624,7 @@ The backend (`analyze_deltas_v5.py`) is fully independent of the GUI and can be 
 
 ## License
 
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the **MIT License**
 
 ```text
 MIT License
