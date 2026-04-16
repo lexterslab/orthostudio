@@ -1,11 +1,7 @@
-```markdown
-# 🔬 OrthoMerge Studio v5
+
+## 🔬 OrthoMerge Studio v5
 
 **Intelligent Model Merging for Diffusion Models**
-
-
-
-
 
 ## What Does This Do?
 
